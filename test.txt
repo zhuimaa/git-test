@@ -18,6 +18,15 @@ import json
 from datetime import datetime
 from typing import Dict, Any
 
+
+# ===================== 自定义 JSON 编码器（处理 datetime 对象）=====================
+class DateTimeEncoder(json.JSONEncoder):
+    """处理 datetime 对象的自定义 JSON 编码器"""
+    def default(self, obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return super().default(obj)
+
 # ===================== StarRocks 连接参数配置 =====================
 STARROCKS_HOST = "10.9.12.166"
 STARROCKS_PORT = 9030
@@ -28,7 +37,7 @@ STARROCKS_DATABASE = "zx19_wcbfx_gylcpb"
 # ===================== StarRocks 工具函数（纯标准库，零外部依赖） =====================
 
 class _StarRocksClient:
-    """极简 MySQL 协议客户端，仅标准库 socket/struct/hashlib，无需任何第三方依赖"""
+    """极简 MySQL 协议客户端，仅标准库 socket/struct/hashlib"""
 
     def __init__(self, host, port, user, password, database, connect_timeout=10):
         import socket
@@ -106,7 +115,7 @@ class _StarRocksClient:
         pos += 10
         auth2_len = max(auth_data_len - 8, 12) if auth_data_len > 8 else 12
         auth2 = payload[pos:pos + auth2_len]
-        scramble = auth1 + auth2
+        scramble = (auth1 + auth2)[:20]
 
         password = self._password.encode()
         hash1 = hashlib.sha1(password).digest()
@@ -140,6 +149,7 @@ class _StarRocksClient:
 
     def query(self, sql):
         import struct
+        self._seq = 0
         self._send_packet(bytes([0x03]) + sql.encode())
 
         pkt = self._read_packet()
@@ -204,19 +214,38 @@ class _StarRocksClient:
 
 
 def get_starrocks_connection():
-    """建立 StarRocks 连接，调用方负责 close()"""
-    return _StarRocksClient(
-        host=STARROCKS_HOST, port=STARROCKS_PORT,
-        user=STARROCKS_USER, password=STARROCKS_PASSWORD,
-        database=STARROCKS_DATABASE, connect_timeout=10,
-    )
+    """建立 StarRocks 连接"""
+    try:
+        return _StarRocksClient(
+            host=STARROCKS_HOST, port=STARROCKS_PORT,
+            user=STARROCKS_USER, password=STARROCKS_PASSWORD,
+            database=STARROCKS_DATABASE, connect_timeout=10,
+        )
+    except Exception:
+        return None
 
 
 def execute_query(sql: str, params: list = None) -> tuple:
     """执行 SELECT，返回 (列名列表, 行列表)"""
     client = get_starrocks_connection()
+    if client is None:
+        return [], []
     try:
-        return client.query(sql)
+        columns, rows = client.query(sql)
+        # 数据已是字符串，保留 datetime 转换逻辑兼容上游
+        rows_converted = []
+        for row in rows:
+            if isinstance(row, dict):
+                row_converted = {}
+                for key, value in row.items():
+                    if isinstance(value, datetime):
+                        row_converted[key] = value.isoformat()
+                    else:
+                        row_converted[key] = value
+                rows_converted.append(row_converted)
+            else:
+                rows_converted.append(row)
+        return columns, rows_converted
     finally:
         client.close()
 
